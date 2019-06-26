@@ -189,6 +189,8 @@ enum {
 	CommandWriteHeaderG,
 	CommandWriteTimestamps,
 	CommandWriteEmpty,
+	CommandProcessing,
+	CommandPgmThresh,
 };
 
 static COMMAND_LIST cmdline_commands[] =
@@ -223,6 +225,8 @@ static COMMAND_LIST cmdline_commands[] =
 	{ CommandWriteHeaderG,	"-headerg",	"hdg","Sets filename to write the .pgm header to", 0 },
 	{ CommandWriteTimestamps,"-tstamps",	"ts", "Sets filename to write timestamps to", 0 },
 	{ CommandWriteEmpty,	"-empty",	"emp","Write empty output files", 0 },
+	{ CommandProcessing,	"-processing",	"p",  "Pass images into an image processing function", 0 },
+	{ CommandPgmThresh,	"-pgmthreshold",	"pgmt","Set PGM conversion threshold", 0 },
 };
 
 static int cmdline_commands_size = sizeof(cmdline_commands) / sizeof(cmdline_commands[0]);
@@ -267,7 +271,26 @@ typedef struct {
 	int write_empty;
         PTS_NODE_T ptsa;
         PTS_NODE_T ptso;
+	int processing;
+	int pgm_threshold;
 } RASPIRAW_PARAMS_T;
+
+typedef struct {
+	RASPIRAW_PARAMS_T *cfg;
+
+        MMAL_POOL_T *rawcam_pool;
+        MMAL_PORT_T *rawcam_output;
+
+        MMAL_POOL_T *isp_ip_pool;
+        MMAL_PORT_T *isp_ip;
+
+        MMAL_QUEUE_T *awb_queue;
+        int awb_thread_quit;
+        MMAL_PARAMETER_AWB_GAINS_T wb_gains;
+
+        MMAL_QUEUE_T *processing_queue;
+        int processing_thread_quit;
+} RASPIRAW_CALLBACK_T;
 
 void update_regs(const struct sensor_def *sensor, struct mode_def *mode, int hflip, int vflip, int exposure, int gain);
 
@@ -455,17 +478,58 @@ MMAL_STATUS_T create_filenames(char** finalName, char * pattern, int frame)
 	return MMAL_SUCCESS;
 }
 
+static void buffers_to_rawcam(RASPIRAW_CALLBACK_T *dev)
+{
+	MMAL_BUFFER_HEADER_T *buffer;
+
+	while ((buffer = mmal_queue_get(dev->rawcam_pool->queue)) != NULL)
+	{
+		mmal_port_send_buffer(dev->rawcam_output, buffer);
+		//vcos_log_error("Buffer %p to rawcam\n", buffer);
+	}
+} 
+
+static void * processing_thread_task(void *arg)
+{
+	RASPIRAW_CALLBACK_T *dev = (RASPIRAW_CALLBACK_T *)arg;
+	MMAL_BUFFER_HEADER_T *buffer;
+
+	while (!dev->processing_thread_quit)
+	{
+		//Being lazy and using a timed wait instead of setting up a
+		//mechanism for skipping this when destroying the thread
+		buffer = mmal_queue_timedwait(dev->processing_queue, 1000);
+		if (!buffer)
+			continue;
+		if (!mmal_queue_length(dev->processing_queue))
+		{
+			/* If more buffers in the queue, loop so we're working
+			 * on the latest one
+			 */
+			// DO SOME FORM OF PROCESSING ON THE RAW BAYER DATA HERE
+			// buffer->user_data points to the data, with buffer->length
+			// being the length of the data.
+		}
+
+		mmal_buffer_header_release(buffer);
+		buffers_to_rawcam(dev);
+	}
+
+	return NULL;
+}
 int running = 0;
 static void callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buffer)
 {
 	static int count = 0;
+	RASPIRAW_CALLBACK_T *dev = (RASPIRAW_CALLBACK_T*)port->userdata;
+
 	vcos_log_error("Buffer %p returned, filled %d, timestamp %llu, flags %04X", buffer, buffer->length, buffer->pts, buffer->flags);
 	if (running)
 	{
 		RASPIRAW_PARAMS_T *cfg = (RASPIRAW_PARAMS_T *)port->userdata;
 
 		if (!(buffer->flags&MMAL_BUFFER_HEADER_FLAG_CODECSIDEINFO) &&
-                    (((count++)%cfg->saverate)==0))
+                    (((count++)%cfg->saverate)==0))// && (count > 1))
 		{
 			// Save every Nth frame
 			// SD card access is too slow to do much more.
@@ -487,7 +551,30 @@ static void callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buffer)
 					{
 						if (cfg->write_header)
 							fwrite(brcm_header, BRCM_RAW_HEADER_LENGTH, 1, file);
-						fwrite(buffer->data, buffer->length, 1, file);
+						
+						////////////////////////////////////////////////
+						int i,j,k,t;
+						unsigned char *p, *q;
+
+						p = q = buffer->data;
+
+						for(i=1; i<480; i+=2) // calibration needs last three lines
+						{
+						 p += 800;
+
+						 for(j=0; j<640; j+=4, p+=5)
+						 {
+						   k = (((int) p[0])<<2) + ((p[4]>>0)%0x03);
+						   *q++ = (k>=cfg->pgm_threshold) ? 255 : 0;
+
+						   k = (((int) p[2])<<2) + ((p[4]>>4)%0x03);
+						   *q++ = (k>=cfg->pgm_threshold) ? 255 : 0;
+						 }
+						}
+						fprintf(file, "P5 # %dus\n320 240\n255\n", t);
+						fwrite(buffer->data, 240*320 /*buffer->length*/, 1, file);
+						////////////////////////////////////////////////
+						//fwrite(buffer->data, buffer->length, 1, file);
 					}
 					fclose(file);
 				}
@@ -850,6 +937,17 @@ static int parse_cmdline(int argc, char **argv, RASPIRAW_PARAMS_T *cfg)
 			case CommandWriteEmpty:
 				cfg->write_empty = 1;
 				break;
+				
+			case CommandProcessing:
+				cfg->processing = 1;
+				break;
+				
+			case CommandPgmThresh:
+				if (sscanf(argv[i + 1], "%d", &cfg->pgm_threshold) != 1)
+					valid = 0;
+				else
+					i++;
+				break;
 
 			default:
 				valid = 0;
@@ -880,16 +978,16 @@ void modReg(struct mode_def *mode, uint16_t reg, int startBit, int endBit, int v
 
 int main(int argc, char** argv) {
 	RASPIRAW_PARAMS_T cfg = {
-		.mode = 0,
-		.hflip = 0,
-		.vflip = 0,
+		.mode = 7,
+		.hflip = 1,
+		.vflip = 1,
 		.exposure = -1,
 		.gain = -1,
 		.output = NULL,
 		.capture = 0,
 		.write_header = 0,
 		.timeout = 5000,
-		.saverate = 20,
+		.saverate = 8,
 		.bit_depth = -1,
 		.camera_num = -1,
 		.exposure_us = -1,
@@ -909,17 +1007,24 @@ int main(int argc, char** argv) {
 		.write_headerg = NULL,
 		.write_timestamps = NULL,
 		.write_empty = 0,
+		.pgm_threshold = 100,
 		.ptsa = NULL,
 		.ptso = NULL,
+	};
+	RASPIRAW_CALLBACK_T dev = {
+			.cfg = &cfg,
+			.rawcam_pool = NULL,
+			.rawcam_output = NULL
 	};
 	uint32_t encoding;
 	const struct sensor_def *sensor;
 	struct mode_def *sensor_mode = NULL;
+	VCOS_THREAD_T processing_thread;
 
 	bcm_host_init();
 	vcos_log_register("RaspiRaw", VCOS_LOG_CATEGORY);
 
-	if (argc == 1)
+	if (argc == -1)
 	{
 		fprintf(stdout, "\n%s Camera App %s\n\n", basename(argv[0]), VERSION_STRING);
 
@@ -1105,6 +1210,27 @@ fprintf(stderr,"end\n");
 		cfg.exposure = ((int64_t)cfg.exposure_us * 1000) / sensor_mode->line_time_ns;
 		vcos_log_error("Setting exposure to %d from time %dus", cfg.exposure, cfg.exposure_us);
 	}
+	
+	
+	if (cfg.processing)
+	{
+		VCOS_STATUS_T vcos_status;
+		printf("Setup processing thread\n");
+		vcos_status = vcos_thread_create(&processing_thread, "processing-thread",
+					NULL, processing_thread_task, &dev);
+		if(vcos_status != VCOS_SUCCESS)
+		{
+			printf("Failed to create processing thread\n");
+			return -4;
+		}
+		dev.processing_queue = mmal_queue_create();
+		if (!dev.processing_queue)
+		{
+			printf("Failed to create processing queue\n");
+			return -4;
+		}
+	}
+
 
 	update_regs(sensor, sensor_mode, cfg.hflip, cfg.vflip, cfg.exposure, cfg.gain);
 	if (sensor_mode->encoding == 0)
@@ -1540,6 +1666,12 @@ component_destroy:
 	if (render)
 		mmal_component_destroy(render);
 
+	if (cfg.processing)
+	{
+		dev.processing_thread_quit = 1;
+		vcos_thread_join(&processing_thread, NULL);
+	}
+	
 	if (cfg.write_timestamps)
 	{
 		// Save timestamps
