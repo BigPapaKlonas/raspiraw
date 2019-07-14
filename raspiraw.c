@@ -239,7 +239,7 @@ static COMMAND_LIST cmdline_commands[] =
 	{ CommandProcessingYUV,	"-processing_yuv", "PY",  "Pass processed YUV images into an image processing function", 0 },
 	{ CommandOutputYUV,	"-output_yuv",  "oY", "Set the output filename for YUV data", 0 },
 	{ CommandPgmThreshold,	"-pgm_thresh",  "pgm", "Set threshold for conversion to PGM format", -1 },
-	{ CommandPgmThreshold,	"-hough_thresh",  "htt", "Set threshold for Hough Trasnform", -1 },
+	{ CommandHoughThreshold,	"-hough_thresh",  "htt", "Set threshold for Hough Trasnform", -1 },
 	{ CommandRhoThreshold,	"-rho_thresh",  "rho", "Set Rho for Hough Transfrom", -1 },
 	{ CommandThetaThreshold,	"-theta_thresh",  "theta", "Set Theta for Hough Transform", -1 },
 	{ CommandLineLength,	"-line_length",  "ll", "Set line length for Hough Transform", -1 },
@@ -1469,27 +1469,51 @@ static void * processing_thread_task(void *arg)
 			int width = dev->cfg->width;
 			int height = dev->cfg->height;
 			int pgm = dev->cfg->pgm;
-			
+
 			unsigned char *p, *q;
 			p = q = buffer->user_data;
-
+		
+			int green1, green2, red, blue;
+			int gray;
+		
 			clock_t start_pgm = clock(), diff_pgm;
-			for (i = 1; i < height; i += 2)
+			printf("buffer length %d", buffer->length);
+			for (i = 0; i < height; i += 2)
 			{
-				p += 800;
-
-				for(j = 0; j < width; j += 4, p += 5)
+				for(j = 0; j < width; j += 2, p += 2)
 				{
-					k = (((int) p[0])<<2) + ((p[4]>>0)%0x03);
-					*q++ = (k >= pgm) ? 255 : 0;
+						//printf("j %d p %d \n", j, p);
+					blue = p[0];
+					green1 = p[1];
+					green2 = p[width];
+					red = p[width + 1];
+					// Pixel format is BGGR
+					/*red = (((int) p[0]));// + ((p[4]>>0)%0x03);
+					green1 = (((int) p[1]));// + ((p[4]>>4)%0x03);
+					green2 = (((int) p[2]));// + ((p[4]>>4)%0x03);
+					blue = (((int) p[3]));
+*/
+					gray = (red + blue + ((green1 + green2) / 2)) / 3;
+					*q++ = gray;
+					
+					if (j != 0 && j % 4 != 0)
+					{ 
+						printf("j %d \n", j);
+						p++;
+					}
+					//k = (((int) p[0])<<2) + ((p[4]>>0)%0x03);
+					//*q++ = (green1 >= pgm) ? 255 : 0;
 
-					k = (((int) p[2])<<2) + ((p[4]>>4)%0x03);
-					*q++ = (k >= pgm) ? 255 : 0;
+					//k = (((int) p[2])<<2) + ((p[4]>>4)%0x03);
+					//*q++ = (green2 >= pgm) ? 255 : 0;
 				}
 			}
+			//unsigned char* image = (unsigned char*) malloc(width*height); //used to store values in
+
+			//grayscale(buffer->user_data, image, width, height);
 			
-			width = width / 2;
-			height = height / 2;
+			//width = width / 2;
+			//height = height / 2;
 			
 			file = fopen("buffer.pgm", "wb");
 			fprintf(file, "P5 # %dus\n%d %d\n255\n", t, width, height);
