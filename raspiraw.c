@@ -1557,22 +1557,12 @@ static void * processing_thread_task(void *arg)
 			int line_gap = dev->cfg->line_gap;
 			int line_max = dev->cfg->line_max;
 			Line *lines = NULL;
-			houghTransform(buffer->user_data, width, height, hough_thresh, line_length, line_gap, line_max, rho, PI/theta, lines);
-			printf("LINES %d \n", vector_size(lines));
-
+			houghTransform(buffer->user_data, width, height, hough_thresh, line_length, line_gap, line_max, rho, theta, lines);
 			diff_hough = clock() - start_hough;
 			int msec2 = diff_hough * 1000/ CLOCKS_PER_SEC;
-
 			printf("HOUGH Time taken: %d seconds %d milliseconds\n", msec2/1000, msec2%1000);
-			if (dev->cfg->file_example)
-			{
-				file = fopen("hough.pgm", "wb");
-				fprintf(file, "P5 # %dus\n%d %d\n255\n", t, width, height);
-				fwrite(buffer->user_data, width*height, 1, file);
-			}
 
 			dev->cfg->fps_out++;
-			printf("%d FPS\n", dev->cfg->fps_out);			
 			////////////////////////////////////////////////
 		}
 		mmal_buffer_header_release(buffer);
@@ -1641,7 +1631,9 @@ int main(int argc, char** argv) {
 	const struct sensor_def *sensor;
 	struct mode_def *sensor_mode = NULL;
 	VCOS_THREAD_T awb_thread;
-	VCOS_THREAD_T processing_thread;
+	VCOS_THREAD_T processing_thread1;
+	VCOS_THREAD_T processing_thread2;
+	VCOS_THREAD_T processing_thread3;
 	VCOS_THREAD_T processing_yuv_thread;
 
 	//Initialise any non-zero config values.
@@ -1843,15 +1835,31 @@ int main(int argc, char** argv) {
 
 	if (cfg.processing)
 	{
-		VCOS_STATUS_T vcos_status;
-		printf("Setup processing thread\n");
-		vcos_status = vcos_thread_create(&processing_thread, "processing-thread",
+		VCOS_STATUS_T vcos_status1, vcos_status2, vcos_status3;
+		printf("Setup processing threads\n");
+		vcos_status1 = vcos_thread_create(&processing_thread1, "processing-thread1",
 					NULL, processing_thread_task, &dev);
-		if(vcos_status != VCOS_SUCCESS)
+		vcos_status2 = vcos_thread_create(&processing_thread2, "processing-thread2",
+					NULL, processing_thread_task, &dev);
+		vcos_status3 = vcos_thread_create(&processing_thread3, "processing-thread3",
+					NULL, processing_thread_task, &dev);
+		
+		if(vcos_status1 != VCOS_SUCCESS)
 		{
-			printf("Failed to create processing thread\n");
+			printf("Failed to create processing thread #1\n");
 			return -4;
 		}
+		if(vcos_status2 != VCOS_SUCCESS)
+		{
+			printf("Failed to create processing thread #2\n");
+			return -4;
+		}
+		if(vcos_status3 != VCOS_SUCCESS)
+		{
+			printf("Failed to create processing thread #3\n");
+			return -4;
+		}
+		
 		dev.processing_queue = mmal_queue_create();
 		if (!dev.processing_queue)
 		{
@@ -2466,7 +2474,10 @@ component_destroy:
 	if (cfg.processing)
 	{
 		dev.processing_thread_quit = 1;
-		vcos_thread_join(&processing_thread, NULL);
+		vcos_thread_join(&processing_thread1, NULL);
+		vcos_thread_join(&processing_thread2, NULL);
+		vcos_thread_join(&processing_thread3, NULL);
+		printf("FINAL FPS %d\n", cfg.fps_out);
 	}
 
 	if (cfg.write_timestamps)
