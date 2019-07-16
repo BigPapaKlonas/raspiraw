@@ -40,6 +40,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "../ImageProcessing/includes/preproc.h"
 #include "../ImageProcessing/includes/canny.h"
 #include "../ImageProcessing/includes/hough.h"
+#include "../ImageProcessing/includes/vector.h"
 
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
@@ -198,6 +199,8 @@ enum {
 	CommandLineLength,
 	CommandLineGap,
 	CommandLineMax,
+	CommandFileExample,
+	CommandFpsOut,
 };
 
 static COMMAND_LIST cmdline_commands[] =
@@ -245,6 +248,7 @@ static COMMAND_LIST cmdline_commands[] =
 	{ CommandLineLength,	"-line_length",  "ll", "Set line length for Hough Transform", -1 },
 	{ CommandLineGap,	"-line_gap",  "lg", "Set line gap for Hough Transform", -1 },
 	{ CommandLineMax,	"-line_max",  "lm", "Set max lines for Hough Transform", -1 },
+	{ CommandFileExample,	"-file",	"fo",  "Print example file out", 0 },
 };
 
 static int cmdline_commands_size = sizeof(cmdline_commands) / sizeof(cmdline_commands[0]);
@@ -292,6 +296,7 @@ typedef struct {
         int awb;
         int no_preview;
         int processing;
+        int file_example;
 	int fullscreen;		// 0 is use previewRect, non-zero to use full screen
 	int opacity;		// Opacity of window - 0 = transparent, 255 = opaque
 	MMAL_RECT_T preview_window;	// Destination rectangle for the preview window.
@@ -1249,6 +1254,10 @@ static int parse_cmdline(int argc, char **argv, RASPIRAW_PARAMS_T *cfg)
 				else
 					i++;
 				break;
+				
+			case CommandFileExample:
+				cfg->file_example = 1;
+				break;
 
 			default:
 				valid = 0;
@@ -1463,62 +1472,63 @@ static void * processing_thread_task(void *arg)
 			// being the length of the data.
 			////////////////////////////////////////////////
 			FILE *file;
-			int i,j,k,t;
+			int t, k;
 			
-			// Raspiraw params for PGM conversion
+			// Raspiraw params for grayscale conversion
 			int width = dev->cfg->width;
 			int height = dev->cfg->height;
-			int pgm = dev->cfg->pgm;
 
 			unsigned char *p, *q;
 			p = q = buffer->user_data;
-		
-			int green1, green2, red, blue;
-			int gray;
+			int gray, green1, green2, red, blue;
 		
 			clock_t start_pgm = clock(), diff_pgm;
-			printf("buffer length %d", buffer->length);
-			for (i = 0; i < height; i += 2)
+			/*
+			for(int i=1; i<height; i+=2) // calibration needs last three lines
 			{
-				for(j = 0; j < width; j += 2, p += 2)
+				p += 800;
+
+				for(int j=0; j<width; j+=4, p+=5)
 				{
-						//printf("j %d p %d \n", j, p);
-					blue = p[0];
+					k = (((int) p[0])<<2) + ((p[4]>>0)%0x03);
+					*q++ = (k>=100) ? 255 : 0;
+
+					k = (((int) p[2])<<2) + ((p[4]>>4)%0x03);
+					*q++ = (k>=100) ? 255 : 0;
+				}
+			}*/
+			for (int i = 1; i < height; i += 1)
+			{
+				for (int j = 0; j < width; j += 2, p += 2)
+				{
+					// Raw pixel format is RGGB after using flips
+					red = p[0];
 					green1 = p[1];
-					green2 = p[width];
-					red = p[width + 1];
-					// Pixel format is BGGR
-					/*red = (((int) p[0]));// + ((p[4]>>0)%0x03);
-					green1 = (((int) p[1]));// + ((p[4]>>4)%0x03);
-					green2 = (((int) p[2]));// + ((p[4]>>4)%0x03);
-					blue = (((int) p[3]));
-*/
+					//green2 = p[width];
+					//blue = p[width + 1];
+
+					// Apply averaging grayscale method
 					gray = (red + blue + ((green1 + green2) / 2)) / 3;
 					*q++ = gray;
-					
+
+					// 4 pixels per 5 bytes. Skip the next fifth one, 
+					// since it has low order info that is unnecessary 
 					if (j != 0 && j % 4 != 0)
 					{ 
-						printf("j %d \n", j);
 						p++;
 					}
-					//k = (((int) p[0])<<2) + ((p[4]>>0)%0x03);
-					//*q++ = (green1 >= pgm) ? 255 : 0;
-
-					//k = (((int) p[2])<<2) + ((p[4]>>4)%0x03);
-					//*q++ = (green2 >= pgm) ? 255 : 0;
 				}
 			}
-			//unsigned char* image = (unsigned char*) malloc(width*height); //used to store values in
 
-			//grayscale(buffer->user_data, image, width, height);
-			
-			//width = width / 2;
+			width = width / 2;
 			//height = height / 2;
-			
-			file = fopen("buffer.pgm", "wb");
-			fprintf(file, "P5 # %dus\n%d %d\n255\n", t, width, height);
-			fwrite(buffer->user_data, width*height, 1, file);
-		
+
+			if (dev->cfg->file_example)
+			{
+				file = fopen("buffer.pgm", "wb");
+				fprintf(file, "P5 # %dus\n%d %d\n255\n", t, width, height);
+				fwrite(buffer->user_data, width*height, 1, file);
+			}
 			diff_pgm = clock() - start_pgm;
 			int msec1 = diff_pgm * 1000/ CLOCKS_PER_SEC;
 			printf("CONVERSION Time taken: %d seconds %d milliseconds\n", msec1/1000, msec1%1000);
@@ -1531,9 +1541,12 @@ static void * processing_thread_task(void *arg)
 			diff = clock() - start;
 			int msec = diff * 1000/ CLOCKS_PER_SEC;
 			printf("EDGE Time taken: %d seconds %d milliseconds\n", msec/1000, msec%1000);
-			file = fopen("edge.pgm", "wb");
-			fprintf(file, "P5 # %dus\n%d %d\n255\n", t, width, height);
-			fwrite(buffer->user_data, width*height, 1, file);
+			if (dev->cfg->file_example)
+			{
+				file = fopen("edge.pgm", "wb");
+				fprintf(file, "P5 # %dus\n%d %d\n255\n", t, width, height);
+				fwrite(buffer->user_data, width*height, 1, file);
+			}
 			
 			clock_t start_hough = clock(), diff_hough;
 			// Raspiraw params for hough
@@ -1543,20 +1556,23 @@ static void * processing_thread_task(void *arg)
 			int line_length = dev->cfg->line_length;
 			int line_gap = dev->cfg->line_gap;
 			int line_max = dev->cfg->line_max;
-			
-			Vector lines [4];
+			Line *lines = NULL;
 			houghTransform(buffer->user_data, width, height, hough_thresh, line_length, line_gap, line_max, rho, PI/theta, lines);
+			printf("LINES %d \n", vector_size(lines));
+
 			diff_hough = clock() - start_hough;
 			int msec2 = diff_hough * 1000/ CLOCKS_PER_SEC;
-			printf("lines %f %f %f %f\n", lines[0],lines[1],lines[2],lines[3]);
 
 			printf("HOUGH Time taken: %d seconds %d milliseconds\n", msec2/1000, msec2%1000);
-			file = fopen("hough.pgm", "wb");
-			fprintf(file, "P5 # %dus\n%d %d\n255\n", t, width, height);
-			fwrite(buffer->user_data, width*height, 1, file);
+			if (dev->cfg->file_example)
+			{
+				file = fopen("hough.pgm", "wb");
+				fprintf(file, "P5 # %dus\n%d %d\n255\n", t, width, height);
+				fwrite(buffer->user_data, width*height, 1, file);
+			}
 
-			fps++;
-			printf("%d FPS\n", fps);			
+			dev->cfg->fps_out++;
+			printf("%d FPS\n", dev->cfg->fps_out);			
 			////////////////////////////////////////////////
 		}
 		mmal_buffer_header_release(buffer);
@@ -1648,6 +1664,9 @@ int main(int argc, char** argv) {
 	cfg.fullscreen = 1;
 	cfg.mode = 7;
 	cfg.fps_out = 0;
+	cfg.line_gap = 0;
+	cfg.vflip = 1;
+	cfg.hflip = 1;
 
 	bcm_host_init();
 	vcos_log_register("RaspiRaw", VCOS_LOG_CATEGORY);
