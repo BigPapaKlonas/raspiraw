@@ -1471,60 +1471,44 @@ static void * processing_thread_task(void *arg)
 			// buffer->user_data points to the data, with buffer->length
 			// being the length of the data.
 			////////////////////////////////////////////////
-			FILE *file;
-			int t, k;
+			int k;
 			
 			// Raspiraw params for grayscale conversion
 			int width = dev->cfg->width;
 			int height = dev->cfg->height;
 
-			unsigned char *p, *q;
-			p = q = buffer->user_data;
+			unsigned char *pixels, *gray_image;
+			pixels = gray_image = buffer->user_data;
 			int gray, green1, green2, red, blue;
 		
 			clock_t start_pgm = clock(), diff_pgm;
-			/*
-			for(int i=1; i<height; i+=2) // calibration needs last three lines
+			for (int i = 1; i < height; i += 2)
 			{
-				p += 800;
-
-				for(int j=0; j<width; j+=4, p+=5)
-				{
-					k = (((int) p[0])<<2) + ((p[4]>>0)%0x03);
-					*q++ = (k>=100) ? 255 : 0;
-
-					k = (((int) p[2])<<2) + ((p[4]>>4)%0x03);
-					*q++ = (k>=100) ? 255 : 0;
-				}
-			}*/
-			for (int i = 1; i < height; i += 1)
-			{
-				for (int j = 0; j < width; j += 2, p += 2)
+				pixels += 800;
+				// 4 pixels per 5 bytes. Skip the next fifth one, 
+				// since it has low order info that is unnecessary 
+				for (int j = 0; j < width; j += 4, pixels += 5)
 				{
 					// Raw pixel format is RGGB after using flips
-					red = p[0];
-					green1 = p[1];
-					//green2 = p[width];
-					//blue = p[width + 1];
-
+					red = pixels[0];
+					green1 = pixels[1];
+					green2 = pixels[2];
+					blue = pixels[3];
+					
 					// Apply averaging grayscale method
 					gray = (red + blue + ((green1 + green2) / 2)) / 3;
-					*q++ = gray;
-
-					// 4 pixels per 5 bytes. Skip the next fifth one, 
-					// since it has low order info that is unnecessary 
-					if (j != 0 && j % 4 != 0)
-					{ 
-						p++;
-					}
+					*gray_image++ = gray;
 				}
 			}
-
-			width = width / 2;
-			//height = height / 2;
+			
+			// Reduce image size
+			width = width / 4;
+			height = height / 2;
 
 			if (dev->cfg->file_example)
 			{
+				FILE *file;
+				int t;
 				file = fopen("buffer.pgm", "wb");
 				fprintf(file, "P5 # %dus\n%d %d\n255\n", t, width, height);
 				fwrite(buffer->user_data, width*height, 1, file);
@@ -1534,15 +1518,15 @@ static void * processing_thread_task(void *arg)
 			printf("CONVERSION Time taken: %d seconds %d milliseconds\n", msec1/1000, msec1%1000);
 			
 			clock_t start = clock(), diff;
-			//unsigned char* image8 = (unsigned char*) malloc(width*height); //used to store values in
-			//unsigned char* tempBuf = (unsigned char*) malloc(width*height*4); //used to store values in
-			
-			detectEdgeCanny(buffer->user_data, NULL, &width, &height);
+			unsigned char* tempBuf = (unsigned char*) malloc(width*height*4);
+			detectEdgeCanny(buffer->user_data, tempBuf, &width, &height);
 			diff = clock() - start;
 			int msec = diff * 1000/ CLOCKS_PER_SEC;
 			printf("EDGE Time taken: %d seconds %d milliseconds\n", msec/1000, msec%1000);
 			if (dev->cfg->file_example)
 			{
+				FILE *file;
+				int t;
 				file = fopen("edge.pgm", "wb");
 				fprintf(file, "P5 # %dus\n%d %d\n255\n", t, width, height);
 				fwrite(buffer->user_data, width*height, 1, file);
@@ -1550,14 +1534,11 @@ static void * processing_thread_task(void *arg)
 			
 			clock_t start_hough = clock(), diff_hough;
 			// Raspiraw params for hough
-			int hough_thresh = dev->cfg->hough_thresh;
-			int rho = dev->cfg->rho;
-			int theta = dev->cfg->theta;
-			int line_length = dev->cfg->line_length;
-			int line_gap = dev->cfg->line_gap;
-			int line_max = dev->cfg->line_max;
-			Line *lines = NULL;
-			houghTransform(buffer->user_data, width, height, hough_thresh, line_length, line_gap, line_max, rho, theta, lines);
+			houghTransform(buffer->user_data, width, height, 
+				dev->cfg->hough_thresh, dev->cfg->line_length, 
+				dev->cfg->line_gap, dev->cfg->line_max, 
+				dev->cfg->rho, dev->cfg->theta, 
+				dev->cfg->pgm, dev->cfg->file_example);
 			diff_hough = clock() - start_hough;
 			int msec2 = diff_hough * 1000/ CLOCKS_PER_SEC;
 			printf("HOUGH Time taken: %d seconds %d milliseconds\n", msec2/1000, msec2%1000);

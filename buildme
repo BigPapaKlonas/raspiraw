@@ -1,1 +1,1 @@
-gcc -g -O0 -lmmal_core -lmmal_util -lmmal_vc_client -lvcos -lbcm_host -lvcsm -lm -I/opt/vc/include/ -L/opt/vc/lib/ -o raspiraw raspiraw.c RaspiCLI.c ../ImageProcessing/sources/canny.c ../ImageProcessing/sources/preproc.c ../ImageProcessing/sources/hough.c
+gcc -g -O0 -lmmal_core -lmmal_util -lmmal_vc_client -lvcos -lbcm_host -lvcsm -lm -I/opt/vc/include/ -L/opt/vc/lib/ -o raspiraw raspiraw.c RaspiCLI.c ../ImageProcessing/sources/canny.c ../ImageProcessing/sources/preproc.c ../ImageProcessing/sources/hough.c ../ImageProcessing/sources/distance.c
