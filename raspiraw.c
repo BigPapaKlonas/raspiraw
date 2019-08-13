@@ -201,6 +201,8 @@ enum {
 	CommandLineMax,
 	CommandFileExample,
 	CommandFpsOut,
+	CommandAngle,
+	CommandVerbose,
 };
 
 static COMMAND_LIST cmdline_commands[] =
@@ -249,6 +251,8 @@ static COMMAND_LIST cmdline_commands[] =
 	{ CommandLineGap,	"-line_gap",  "lg", "Set line gap for Hough Transform", -1 },
 	{ CommandLineMax,	"-line_max",  "lm", "Set max lines for Hough Transform", -1 },
 	{ CommandFileExample,	"-file",	"fo",  "Print example file out", 0 },
+	{ CommandAngle,	"-angle",	"ang",  "Angle of cone top", -1 },
+	{ CommandVerbose,	"-verbose",	"V",  "Print out erformance for individual steps", 0 },
 };
 
 static int cmdline_commands_size = sizeof(cmdline_commands) / sizeof(cmdline_commands[0]);
@@ -311,6 +315,8 @@ typedef struct {
 	int line_gap;
 	int line_max;
 	int fps_out;
+	int angle;
+	int verbose;
 } RASPIRAW_PARAMS_T;
 
 typedef struct {
@@ -629,7 +635,6 @@ static void callback(MMAL_PORT_T *port, MMAL_BUFFER_HEADER_T *buffer)
 					{
 						if (cfg->write_header)
 							fwrite(brcm_header, BRCM_RAW_HEADER_LENGTH, 1, file);
-							
 						fwrite(buffer->user_data, buffer->length, 1, file);
 					}
 					fclose(file);
@@ -1125,6 +1130,11 @@ static int parse_cmdline(int argc, char **argv, RASPIRAW_PARAMS_T *cfg)
 			case CommandProcessing:
 				cfg->processing = 1;
 				break;
+				
+			case CommandVerbose:
+				cfg->verbose = 1;
+				break;
+				
 			case CommandPreview: // Preview window
 			{
 				int tmp;
@@ -1250,6 +1260,13 @@ static int parse_cmdline(int argc, char **argv, RASPIRAW_PARAMS_T *cfg)
 			
 			case CommandLineMax:
 				if (sscanf(argv[i + 1], "%d", &cfg->line_max) != 1)
+					valid = 0;
+				else
+					i++;
+				break;
+				
+			case CommandAngle:
+				if (sscanf(argv[i + 1], "%d", &cfg->angle) != 1)
 					valid = 0;
 				else
 					i++;
@@ -1452,8 +1469,6 @@ static void * processing_thread_task(void *arg)
 {
 	RASPIRAW_CALLBACK_T *dev = (RASPIRAW_CALLBACK_T *)arg;
 	MMAL_BUFFER_HEADER_T *buffer;
-	
-	int fps = 0;
 
 	while (!dev->processing_thread_quit)
 	{
@@ -1471,7 +1486,6 @@ static void * processing_thread_task(void *arg)
 			// buffer->user_data points to the data, with buffer->length
 			// being the length of the data.
 			////////////////////////////////////////////////
-			int k;
 			
 			// Raspiraw params for grayscale conversion
 			int width = dev->cfg->width;
@@ -1498,13 +1512,21 @@ static void * processing_thread_task(void *arg)
 					// Apply averaging grayscale method
 					gray = (red + blue + ((green1 + green2) / 2)) / 3;
 					*gray_image++ = gray;
+					*gray_image++ = gray;
+					//gray_image++ = gray;
+					//gray_image++ = gray;
 				}
 			}
-			
+			//printf("image length %d\n", strlen(gray_image));
 			// Reduce image size
-			width = width / 4;
+			width = width / 2;
 			height = height / 2;
-
+			if (dev->cfg->verbose)
+			{
+				diff_pgm = clock() - start_pgm;
+				int msec1 = diff_pgm * 1000/ CLOCKS_PER_SEC;
+				printf("GRAY Time taken: %d seconds %d milliseconds\n", msec1/1000, msec1%1000);
+			}
 			if (dev->cfg->file_example)
 			{
 				FILE *file;
@@ -1513,16 +1535,18 @@ static void * processing_thread_task(void *arg)
 				fprintf(file, "P5 # %dus\n%d %d\n255\n", t, width, height);
 				fwrite(buffer->user_data, width*height, 1, file);
 			}
-			diff_pgm = clock() - start_pgm;
-			int msec1 = diff_pgm * 1000/ CLOCKS_PER_SEC;
-			printf("CONVERSION Time taken: %d seconds %d milliseconds\n", msec1/1000, msec1%1000);
 			
-			clock_t start = clock(), diff;
+			clock_t start_edge = clock(), diff_edge;
 			unsigned char* tempBuf = (unsigned char*) malloc(width*height*4);
 			detectEdgeCanny(buffer->user_data, tempBuf, &width, &height);
-			diff = clock() - start;
-			int msec = diff * 1000/ CLOCKS_PER_SEC;
-			printf("EDGE Time taken: %d seconds %d milliseconds\n", msec/1000, msec%1000);
+			free(tempBuf);
+			
+			if (dev->cfg->verbose)
+			{
+				diff_edge = clock() - start_edge;
+				int msec2 = diff_edge * 1000/ CLOCKS_PER_SEC;
+				printf("EDGE Time taken: %d seconds %d milliseconds\n", msec2/1000, msec2%1000);
+			}
 			if (dev->cfg->file_example)
 			{
 				FILE *file;
@@ -1537,13 +1561,15 @@ static void * processing_thread_task(void *arg)
 			houghTransform(buffer->user_data, width, height, 
 				dev->cfg->hough_thresh, dev->cfg->line_length, 
 				dev->cfg->line_gap, dev->cfg->line_max, 
-				dev->cfg->rho, dev->cfg->theta, 
-				dev->cfg->pgm, dev->cfg->file_example);
-			diff_hough = clock() - start_hough;
-			int msec2 = diff_hough * 1000/ CLOCKS_PER_SEC;
-			printf("HOUGH Time taken: %d seconds %d milliseconds\n", msec2/1000, msec2%1000);
-
+				dev->cfg->rho, dev->cfg->theta, dev->cfg->pgm, 
+				dev->cfg->angle, dev->cfg->file_example);
 			dev->cfg->fps_out++;
+			if (dev->cfg->verbose)
+			{
+				diff_hough = clock() - start_hough;
+				int msec3 = start_hough * 1000/ CLOCKS_PER_SEC;
+				printf("PPHT Time taken: %d seconds %d milliseconds\n", msec3/1000, msec3%1000);
+			}
 			////////////////////////////////////////////////
 		}
 		mmal_buffer_header_release(buffer);
